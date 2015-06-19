@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
-	"runtime"
+	"syscall"
 )
 
 const (
@@ -17,12 +17,11 @@ const (
 )
 
 type Cdb struct {
-	r      io.ReaderAt
-	closer io.Closer
+	// Slice backed by the mmapped file.
+	mmappedData []byte
 }
 
 type Context struct {
-	buf    []byte
 	loop   uint32 // number of hash slots searched under this key
 	khash  uint32 // initialized if loop is nonzero
 	kpos   uint32 // initialized if loop is nonzero
@@ -32,6 +31,25 @@ type Context struct {
 	dlen   uint32 // initialized if FindNext() returns true
 }
 
+func newWithFile(f *os.File) (*Cdb, error) {
+	// Get file info. We need its size later to map it entirelly.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	// Mmap file.
+	mmappedData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()),
+		syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Cdb{
+		mmappedData,
+	}, nil
+}
+
 // Open opens the named file read-only and returns a new Cdb object.  The file
 // should exist and be a cdb-format database file.
 func Open(name string) (*Cdb, error) {
@@ -39,71 +57,67 @@ func Open(name string) (*Cdb, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := New(f)
-	c.closer = f
-	runtime.SetFinalizer(c, (*Cdb).Close)
-	return c, nil
+
+	// We do not need to keep the file opened after it is mmapped.
+	defer f.Close()
+
+	return newWithFile(f)
 }
 
 // Close closes the cdb for any further reads.
 func (c *Cdb) Close() (err error) {
-	if c.closer != nil {
-		err = c.closer.Close()
-		c.closer = nil
-		runtime.SetFinalizer(c, nil)
-	}
-	return err
+	// Unmap data.
+	return syscall.Munmap(c.mmappedData)
 }
 
-// New creates a new Cdb from the given ReaderAt, which should be a cdb format database.
+// New creates a new Cdb from the given ReaderAt, which should be a cdb format
+// database.
 func New(r io.ReaderAt) *Cdb {
-	c := new(Cdb)
-	c.r = r
+	c, _ := newWithFile(r.(*os.File))
+
 	return c
 }
 
 // NewContext returns a new context to be used in CDB calls.
 func NewContext() *Context {
-	return &Context{
-		buf: make([]byte, 64),
-	}
+	// Zero values for the context are ok, so no need to set them
+	// explicitly here.
+	return &Context{}
 }
 
 // Data returns the first data value for the given key.
 // If no such record exists, it returns EOF.
-func (c *Cdb) Data(key []byte, context *Context) (data []byte, err error) {
+func (c *Cdb) Data(key []byte, context *Context) ([]byte, error) {
 	c.FindStart(context)
-	if err = c.find(key, context); err != nil {
+	if err := c.find(key, context); err != nil {
 		return nil, err
 	}
 
-	data = make([]byte, context.dlen)
-	err = c.read(data, context.dpos)
+	data := c.mmappedData[context.dpos : context.dpos+context.dlen]
 
-	return
+	return data, nil
 }
 
 // FindStart resets the cdb to search for the first record under a new key.
 func (c *Cdb) FindStart(context *Context) { context.loop = 0 }
 
-// FindNext returns the next data value for the given key as a SectionReader.
+// FindNext returns the next data value for the given key as a byte slice.
 // If there are no more records for the given key, it returns EOF.
 // FindNext acts as an iterator: The iteration should be initialized by calling
 // FindStart and all subsequent calls to FindNext should use the same key value.
-func (c *Cdb) FindNext(key []byte,
-	context *Context) (rdata *io.SectionReader, err error) {
+func (c *Cdb) FindNext(key []byte, context *Context) ([]byte, error) {
 	if err := c.find(key, context); err != nil {
 		return nil, err
 	}
-	return io.NewSectionReader(c.r, int64(context.dpos),
-		int64(context.dlen)), nil
+
+	return c.mmappedData[context.dpos : context.dpos+context.dlen], nil
 }
 
-// Find returns the first data value for the given key as a SectionReader.
+// Find returns the first data value for the given key as a byte slice.
 // Find is the same as FindStart followed by FindNext.
-func (c *Cdb) Find(key []byte,
-	context *Context) (rdata *io.SectionReader, err error) {
+func (c *Cdb) Find(key []byte, context *Context) ([]byte, error) {
 	c.FindStart(context)
+
 	return c.FindNext(key, context)
 }
 
@@ -144,7 +158,7 @@ func (c *Cdb) find(key []byte, context *Context) (err error) {
 		if h == context.khash {
 			rklen, rdlen := c.readNums(pos, context)
 			if rklen == klen {
-				if c.match(key, pos+8, context) {
+				if c.match(key, pos+8) {
 					context.dlen = rdlen
 					context.dpos = pos + 8 + klen
 					return nil
@@ -156,34 +170,13 @@ func (c *Cdb) find(key []byte, context *Context) (err error) {
 	return io.EOF
 }
 
-func (c *Cdb) read(buf []byte, pos uint32) error {
-	_, err := c.r.ReadAt(buf, int64(pos))
-	return err
-}
-
-func (c *Cdb) match(key []byte, pos uint32, context *Context) bool {
-	buf := context.buf
-	klen := len(key)
-	for n := 0; n < klen; n += len(buf) {
-		nleft := klen - n
-		if len(buf) > nleft {
-			buf = buf[:nleft]
-		}
-		if err := c.read(buf, pos); err != nil {
-			panic(err)
-		}
-		if !bytes.Equal(buf, key[n:n+len(buf)]) {
-			return false
-		}
-		pos += uint32(len(buf))
-	}
-	return true
+func (c *Cdb) match(key []byte, pos uint32) bool {
+	return bytes.Equal(c.mmappedData[pos:pos+uint32(len(key))], key)
 }
 
 func (c *Cdb) readNums(pos uint32, context *Context) (uint32, uint32) {
-	if _, err := c.r.ReadAt(context.buf[:8], int64(pos)); err != nil {
-		panic(err)
-	}
-	return binary.LittleEndian.Uint32(context.buf),
-		binary.LittleEndian.Uint32(context.buf[4:])
+	data := c.mmappedData[pos : pos+8]
+
+	return binary.LittleEndian.Uint32(data),
+		binary.LittleEndian.Uint32(data[4:])
 }

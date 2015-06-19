@@ -70,11 +70,7 @@ func TestCdb(t *testing.T) {
 				t.Fatalf("Record read failed: %s", err)
 			}
 
-			data := make([]byte, sr.Size())
-			_, err = sr.Read(data)
-			if err != nil {
-				t.Fatalf("Record read failed: %s", err)
-			}
+			data := sr
 
 			if !bytes.Equal(data, []byte(value)) {
 				t.Fatal("value mismatch")

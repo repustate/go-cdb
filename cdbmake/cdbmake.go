@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"github.com/jbarham/go-cdb"
+	"github.com/repustate/go-cdb"
 	"io/ioutil"
 	"log"
 	"os"

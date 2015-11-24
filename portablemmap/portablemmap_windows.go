@@ -68,5 +68,23 @@ func Mmap(f *os.File) ([]byte, error) {
 }
 
 func Munmap(mmappedData []byte) error {
-	return fmt.Errorf("IMPLEMENT ME!")
+	sliceHeader := *(*reflect.SliceHeader)(unsafe.Pointer(&mmappedData))
+
+	err := syscall.UnmapViewOfFile(sliceHeader.Data)
+	if err != nil {
+		return err
+	}
+
+	handleLock.Lock()
+	defer handleLock.Unlock()
+	handle, ok := handleMap[sliceHeader.Data]
+	if !ok {
+		return fmt.Errorf("can't find handle for mapped address")
+	}
+
+	delete(handleMap, sliceHeader.Data)
+
+	err = syscall.CloseHandle(syscall.Handle(handle))
+
+	return os.NewSyscallError("CloseHandle", err)
 }

@@ -9,7 +9,8 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
-	"syscall"
+
+	"github.com/repustate/go-cdb/portablemmap"
 )
 
 const (
@@ -32,15 +33,7 @@ type Context struct {
 }
 
 func newWithFile(f *os.File) (*Cdb, error) {
-	// Get file info. We need its size later to map it entirelly.
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	// Mmap file.
-	mmappedData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()),
-		syscall.PROT_READ, syscall.MAP_SHARED)
+	mmappedData, err := portablemmap.Mmap(f)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +60,7 @@ func Open(name string) (*Cdb, error) {
 // Close closes the cdb for any further reads.
 func (c *Cdb) Close() (err error) {
 	// Unmap data.
-	return syscall.Munmap(c.mmappedData)
+	return portablemmap.Munmap(c.mmappedData)
 }
 
 // New creates a new Cdb from the given ReaderAt, which should be a cdb format

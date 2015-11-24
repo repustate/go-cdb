@@ -3,10 +3,9 @@ package cdb
 import (
 	"io"
 	"log"
-	"reflect"
 	"sync"
-	"syscall"
-	"unsafe"
+
+	"github.com/repustate/go-cdb/portablemmap"
 )
 
 // Reader is the interface to be used by constant database readers. Its methods
@@ -55,13 +54,7 @@ func putContext(context *Context) {
 }
 
 func (r *reader) Preload() {
-	// Prefaults mmaped file so it is preloaded in the filesystem cache.
-	// Note that you should *NOT* call this if the CDB file is bigger than
-	// the available physical memory.
-	sliceHeader := *(*reflect.SliceHeader)(unsafe.Pointer(&r.c.mmappedData))
-	syscall.Syscall(syscall.SYS_MSYNC, uintptr(sliceHeader.Data),
-		uintptr(sliceHeader.Len), uintptr(
-			syscall.MADV_WILLNEED|syscall.MADV_RANDOM))
+	portablemmap.Prefault(r.c.mmappedData)
 }
 
 func (r *reader) First(key []byte, tag uint8) ([]byte, bool) {

@@ -59,7 +59,7 @@ func Mmap(f *os.File) ([]byte, error) {
 	mmappedData := []byte{}
 
 	// Force slice to cover our mmaped region.
-	sliceHeader := *(*reflect.SliceHeader)(unsafe.Pointer(&mmappedData))
+	sliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(&mmappedData))
 	sliceHeader.Data = addr
 	sliceHeader.Len = int(fi.Size())
 	sliceHeader.Cap = int(fi.Size())
